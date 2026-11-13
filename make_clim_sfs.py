@@ -1,10 +1,19 @@
+#!/usr/bin/env python3
 import os
 import sys
+import glob
+import shutil
 import argparse
 import subprocess
 import concurrent.futures
 import numpy as np
 import xarray as xr
+
+DEFAULT_BASE_DIR = os.environ.get(
+    "BASE_DIR",
+    "/lfs/h2/emc/vpppg/noscrub/lydia.b.stefanova/sfs-ver-dev/SFS_VERIF_DATA"
+)
+DEFAULT_VERSION = os.environ.get("version", "sfs_b2")
 
 VAR_CONFIGS = {
     "inst": {
@@ -20,7 +29,8 @@ VAR_CONFIGS = {
 def parse_args():
     parser = argparse.ArgumentParser(description="Compute SFS Climatology & Terciles")
     parser.add_argument("--init_month", type=int, default=10, help="Initialization month (1-12, default: 10)")
-    parser.add_argument("--base_dir", type=str, default="SFS_VERIF_DATA", help="Base verification data directory")
+    parser.add_argument("--version", type=str, default=DEFAULT_VERSION, help=f"SFS version (default: {DEFAULT_VERSION})")
+    parser.add_argument("--base_dir", type=str, default=DEFAULT_BASE_DIR, help="Base verification data directory")
     return parser.parse_args()
 
 def get_target_yyyymm(init_year, init_month, lead_offset):
@@ -48,22 +58,29 @@ if __name__ == "__main__":
     
     init_m = args.init_month
     init_str = f"{init_m:02d}"
-    
-    data_dir = os.path.join(args.base_dir, "hindcasts", "raw", f"init_{init_str}")
-    clim_dir = os.path.join(args.base_dir, "hindcasts", "climatology_1991-2020", f"init_{init_str}")
-    tmp_nc_dir = os.path.join(args.base_dir, "tmp", f"subsets_init_{init_str}")
+    ver = args.version
+
+    # Consistent with Bash: ${BASE_DIR}/hindcasts/${version}/init_${init_mm}/raw/${yyyy}/mem${mem}
+    data_dir = os.path.join(args.base_dir, "forecasts", ver, f"init_{init_str}")
+    clim_dir = os.path.join(args.base_dir, "forecasts", ver, f"init_{init_str}", "climatology_1991-2020")
+    tmp_nc_dir = os.path.join(args.base_dir, "tmp", ver, f"subsets_init_{init_str}")
 
     os.makedirs(clim_dir, exist_ok=True)
     os.makedirs(tmp_nc_dir, exist_ok=True)
 
     print("==================================================================")
-    print(f"  Calculating 1991-2020 SFS Init Month {init_str} Climatology & Terciles")
+    print(f"  Calculating 1991-2020 SFS ({ver}) Init {init_str} Climatology & Terciles")
     print(f"  Input Directory : {data_dir}")
     print(f"  Output Directory: {clim_dir}")
     print("==================================================================")
 
     for lead_idx in range(12):
-        lead_num = lead_idx + 1
+        lead_num = lead_idx 
+        out_nc = os.path.join(clim_dir, f"sfs_init{init_str}_clim_1991-2020_lead{lead_num:02d}.nc")
+
+        if os.path.exists(out_nc) and os.path.getsize(out_nc) > 0:
+            print(f"[SKIP] Lead {lead_num:02d} already exists: {out_nc}")
+            continue
         print(f"\n[+] Processing Lead Month {lead_num:02d}/12...")
 
         conversion_tasks = []
@@ -74,11 +91,23 @@ if __name__ == "__main__":
             
             for m in range(11):
                 mem_str = f"{m:03d}"
+                mem_dir = os.path.join(data_dir, str(yyyy), f"mem{mem_str}")
+
                 for file_type, cfg in VAR_CONFIGS.items():
-                    grb_file = f"{data_dir}/{yyyy}/mem{mem_str}/{file_type}.monthly.{init_date_str}.{target_yyyymm}.grib.t00z.grb2"
-                    
+                    # Exact expected filename
+                    grb_file = os.path.join(
+                        mem_dir,
+                        f"{file_type}.monthly.{init_date_str}.{target_yyyymm}.grib.t00z.grb2"
+                    )
+
+                    # Fallback glob match in case the suffix differs slightly (e.g., .monthly.*.grb2)
+                    if not os.path.exists(grb_file):
+                        matches = glob.glob(os.path.join(mem_dir, f"{file_type}.monthly.{init_date_str}.{target_yyyymm}*.grb2"))
+                        if matches:
+                            grb_file = matches[0]
+
                     if os.path.exists(grb_file):
-                        tmp_nc = f"{tmp_nc_dir}/sub_{file_type}_{yyyy}_mem{mem_str}_lead{lead_num:02d}.nc"
+                        tmp_nc = os.path.join(tmp_nc_dir, f"sub_{file_type}_{yyyy}_mem{mem_str}_lead{lead_num:02d}.nc")
                         conversion_tasks.append((grb_file, tmp_nc, cfg["regex"]))
 
         print(f"    Found {len(conversion_tasks)} GRIB2 targets. Subsetting via wgrib2...")
@@ -96,8 +125,8 @@ if __name__ == "__main__":
         for yyyy in range(1991, 2021):
             for m in range(11):
                 mem_str = f"{m:03d}"
-                inst_tmp = f"{tmp_nc_dir}/sub_inst_{yyyy}_mem{mem_str}_lead{lead_num:02d}.nc"
-                acc_tmp  = f"{tmp_nc_dir}/sub_acc_{yyyy}_mem{mem_str}_lead{lead_num:02d}.nc"
+                inst_tmp = os.path.join(tmp_nc_dir, f"sub_inst_{yyyy}_mem{mem_str}_lead{lead_num:02d}.nc")
+                acc_tmp  = os.path.join(tmp_nc_dir, f"sub_acc_{yyyy}_mem{mem_str}_lead{lead_num:02d}.nc")
                 
                 opened = []
                 for tmp_file in [inst_tmp, acc_tmp]:
@@ -123,10 +152,10 @@ if __name__ == "__main__":
             clim_ds[f"{var}_tercile_p33"] = data.quantile(1.0/3.0, dim="sample", keep_attrs=True).drop_vars("quantile", errors="ignore").astype(np.float32)
             clim_ds[f"{var}_tercile_p67"] = data.quantile(2.0/3.0, dim="sample", keep_attrs=True).drop_vars("quantile", errors="ignore").astype(np.float32)
 
-        clim_ds.attrs["description"] = f"SFS Init Month {init_str} Reforecast 1991-2020 Base Climatology for Lead Month {lead_num:02d}"
+        clim_ds.attrs["description"] = f"SFS {ver} Init Month {init_str} Reforecast 1991-2020 Base Climatology for Lead Month {lead_num:02d}"
         clim_ds.attrs["sample_size"] = len(sample_datasets)
 
-        out_nc = f"{clim_dir}/sfs_init{init_str}_clim_1991-2020_lead{lead_num:02d}.nc"
+        out_nc = os.path.join(clim_dir, f"sfs_init{init_str}_clim_1991-2020_lead{lead_num:02d}.nc")
         clim_ds.to_netcdf(out_nc)
         print(f"    [✔] Saved Complete Climatology: {out_nc}")
 
@@ -137,4 +166,4 @@ if __name__ == "__main__":
                 os.remove(f)
 
     if os.path.exists(tmp_nc_dir):
-        os.rmdir(tmp_nc_dir)
+        shutil.rmtree(tmp_nc_dir, ignore_errors=True)

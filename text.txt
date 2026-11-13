@@ -1,0 +1,163 @@
+import glob
+import shutil
+import re
+import warnings
+import cfgrib
+import numpy as np
+import xarray as xr
+
+warnings.filterwarnings("ignore", category=FutureWarning)
+
+core_out_nc = WORK_DIR / "core_circ_climo_terciles_1991_2020.nc"
+
+if core_out_nc.exists():
+    print(f"Skipping CORe processing: '{core_out_nc.name}' already exists in Google Drive.")
+else:
+    files = sorted(glob.glob(str(SCRATCH_DIR / "pgb.*.grb")))
+    if not files:
+        raise FileNotFoundError(f"No GRIB files found in {SCRATCH_DIR}. Ensure Cell 3 completed.")
+
+    print(f"Found {len(files)} CORe files in scratch space.")
+
+    # 1. Inspect grid coordinates from the first file
+    sample_dss = cfgrib.open_datasets(files[0], backend_kwargs={'indexpath': ''})
+    lats = sample_dss[0]['latitude'].values
+    lons = sample_dss[0]['longitude'].values
+    nlat, nlon = len(lats), len(lons)
+    print(f"Grid detected: {nlat} latitudes x {nlon} longitudes")
+
+    # 2. Preallocate storage and unit metadata tracker
+    target_vars = ['z500', 't850', 'u850', 'v850', 'u200', 'v200', 'mslp']
+    raw_storage = {
+        var: np.full((12, 30, nlat, nlon), np.nan, dtype=np.float32)
+        for var in target_vars
+    }
+    core_units = {}
+
+    def classify_var(vname):
+        vn = vname.lower()
+        if vn in ['gh', 'hgt', 'z']:
+            return 'z'
+        elif vn in ['avg_t', 't', 'tmp']:
+            return 't'
+        elif vn in ['avg_u', 'u', 'ugrd']:
+            return 'u'
+        elif vn in ['avg_v', 'v', 'vgrd']:
+            return 'v'
+        elif vn in ['prmsl', 'msl', 'mslet', 'pres']:
+            return 'mslp'
+        return None
+
+    def extract_level_slice(da, target_lev):
+        if 'isobaricInhPa' not in da.coords:
+            return None
+        coord = da.coords['isobaricInhPa']
+        if coord.ndim == 0:
+            if round(float(coord.values)) == target_lev:
+                return np.squeeze(da.values)
+            return None
+        elif coord.ndim == 1:
+            levs = [round(float(x)) for x in coord.values]
+            if target_lev in levs:
+                idx = levs.index(target_lev)
+                return np.squeeze(da.values[idx])
+            return None
+        return None
+
+    # 3. Extract 2D slices across all 360 files in native units
+    print("Extracting 7 circulation fields across 360 months...")
+    for i, f in enumerate(files):
+        match = re.search(r'pgb\.(\d{4})(\d{2})', f)
+        if not match:
+            continue
+        yr = int(match.group(1))
+        mo = int(match.group(2))
+        y_idx = yr - 1991
+        m_idx = mo - 1
+
+        dss = cfgrib.open_datasets(f, backend_kwargs={'indexpath': ''})
+
+        for ds in dss:
+            for vname, da in ds.data_vars.items():
+                vtype = classify_var(vname)
+                if not vtype:
+                    continue
+
+                if 'isobaricInhPa' in da.coords:
+                    if vtype == 'z':
+                        arr = extract_level_slice(da, 500)
+                        if arr is not None:
+                            raw_storage['z500'][m_idx, y_idx] = arr
+                            if 'z500' not in core_units and 'units' in da.attrs:
+                                core_units['z500'] = da.attrs['units']
+                    elif vtype == 't':
+                        arr = extract_level_slice(da, 850)
+                        if arr is not None:
+                            raw_storage['t850'][m_idx, y_idx] = arr
+                            if 't850' not in core_units and 'units' in da.attrs:
+                                core_units['t850'] = da.attrs['units']
+                    elif vtype == 'u':
+                        arr850 = extract_level_slice(da, 850)
+                        if arr850 is not None:
+                            raw_storage['u850'][m_idx, y_idx] = arr850
+                            if 'u850' not in core_units and 'units' in da.attrs:
+                                core_units['u850'] = da.attrs['units']
+                        arr200 = extract_level_slice(da, 200)
+                        if arr200 is not None:
+                            raw_storage['u200'][m_idx, y_idx] = arr200
+                            if 'u200' not in core_units and 'units' in da.attrs:
+                                core_units['u200'] = da.attrs['units']
+                    elif vtype == 'v':
+                        arr850 = extract_level_slice(da, 850)
+                        if arr850 is not None:
+                            raw_storage['v850'][m_idx, y_idx] = arr850
+                            if 'v850' not in core_units and 'units' in da.attrs:
+                                core_units['v850'] = da.attrs['units']
+                        arr200 = extract_level_slice(da, 200)
+                        if arr200 is not None:
+                            raw_storage['v200'][m_idx, y_idx] = arr200
+                            if 'v200' not in core_units and 'units' in da.attrs:
+                                core_units['v200'] = da.attrs['units']
+                elif vtype == 'mslp':
+                    raw_storage['mslp'][m_idx, y_idx] = np.squeeze(da.values)
+                    if 'mslp' not in core_units and 'units' in da.attrs:
+                        core_units['mslp'] = da.attrs['units']
+
+        if (i + 1) % 60 == 0:
+            print(f"  Processed {i + 1}/360 files...")
+
+    print(f"\nHarvested native GRIB units: {core_units}")
+
+    # 4. Compute 1991–2020 statistics (Mean, StdDev, p33, p67)
+    print("Computing 1991–2020 statistics...")
+    coords = {
+        'month': np.arange(1, 13),
+        'latitude': lats,
+        'longitude': lons
+    }
+    core_ref_ds = xr.Dataset(coords=coords)
+
+    for var in target_vars:
+        data = raw_storage[var]
+        unit_val = core_units.get(var)
+
+        for stat, val in [
+            ('clim', np.mean(data, axis=1).astype(np.float32)),
+            ('std',  np.std(data, axis=1).astype(np.float32)),
+            ('p33',  np.quantile(data, 1.0/3.0, axis=1).astype(np.float32)),
+            ('p67',  np.quantile(data, 2.0/3.0, axis=1).astype(np.float32))
+        ]:
+            field_name = f"{var}_{stat}"
+            core_ref_ds[field_name] = (['month', 'latitude', 'longitude'], val)
+            if unit_val is not None:
+                core_ref_ds[field_name].attrs['units'] = unit_val
+
+    core_ref_ds.attrs['dataset'] = 'NOAA CORe'
+    core_ref_ds.attrs['climo_period'] = '1991-2020'
+
+    # 5. Save to Drive & remove ephemeral scratch
+    core_ref_ds.to_netcdf(core_out_nc)
+    print(f"Successfully saved CORe Baseline to: {core_out_nc}")
+    # 7. Clean up local scratch GRIB files
+    #shutil.rmtree(SCRATCH_DIR)
+    #print("Temporary scratch directory cleaned up.")

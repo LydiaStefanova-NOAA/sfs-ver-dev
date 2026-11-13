@@ -14,7 +14,7 @@ download_month() {
     local year="${ym:0:4}"
     local month="${ym:4:2}"
     local iso_date="${year}-${month}-01T00:00:00Z"
-    local output_file="${OUT_DIR}/ghcncams_${ym}.nc"
+    local output_file="${OUT_DIR}/GHCNCAMS_${ym}.nc"
 
     echo "Fetching ${ym} -> ${output_file}..."
 

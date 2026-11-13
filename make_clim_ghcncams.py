@@ -2,17 +2,17 @@ import os
 import numpy as np
 import xarray as xr
 
-m_dir = "/scratch4/NCEPDEV/ovp/Lydia.B.Stefanova/REPOS/sfs-ver-dev/SFS_VERIF_DATA/verifying_truths/GHCNCAMS/monthly"
-c_dir = "/scratch4/NCEPDEV/ovp/Lydia.B.Stefanova/REPOS/sfs-ver-dev/SFS_VERIF_DATA/verifying_truths/GHCNCAMS/climatology"
+m_dir = "/lfs/h2/emc/vpppg/noscrub/lydia.b.stefanova/sfs-ver-dev/SFS_VERIF_DATA/verifying_truths/GHCNCAMS/monthly"
+c_dir = "/lfs/h2/emc/vpppg/noscrub/lydia.b.stefanova/sfs-ver-dev/SFS_VERIF_DATA/verifying_truths/GHCNCAMS/climatology"
 os.makedirs(c_dir, exist_ok=True)
 
 
 for mm in range(1, 13):
     mm_str = f"{mm:02d}"
     files = [
-        f"{m_dir}/ghcncams_{yyyy}{mm_str}.nc"
+        f"{m_dir}/GHCNCAMS_{yyyy}{mm_str}.nc"
         for yyyy in range(1991, 2021)
-        if os.path.exists(f"{m_dir}/ghcncams_{yyyy}{mm_str}.nc")
+        if os.path.exists(f"{m_dir}/GHCNCAMS_{yyyy}{mm_str}.nc")
     ]
 
     if not files:
@@ -59,7 +59,7 @@ for mm in range(1, 13):
         out_ds[var].encoding = {}
 
     # Save climatology NetCDF file
-    out_file = f"{c_dir}/ghcncam_clim_{mm_str}.nc"
+    out_file = f"{c_dir}/GHCNCAMS_clim_{mm_str}.nc"
     out_ds.to_netcdf(out_file)
 
     # Clean up open file handles
